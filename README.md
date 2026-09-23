@@ -143,7 +143,7 @@ light_bulb.send_preset(preset_name=r+b_b, slowdown=10)
 
 > Make the device flash quickly in green using a preset number
 ```python
-send_preset(preset_number=50, slowdown=1)
+light_bulb.send_preset(preset_number=50, slowdown=1)
 ```
 
 > Turn off the device
