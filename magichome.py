@@ -1,30 +1,26 @@
-"""MagicHome Python API.
+"""Controls devices meant for the Magic Home smartphone app.
 
-Copyright 2016, Adam Kempenich. Licensed under MIT.
-This version was fixed and modernized by Kai Sinz,
-https://github.com/k-sinz
+Quick start::
 
-It currently supports:
-- RGB Controllers (Type 0)
-- RGB+WW Controllers (Type 1)
-- RGB+WW+CW Controllers (Type 2)
-- Bulbs using Firmware v.4 and greater (Type 3)
-- Legacy Bulbs using Firmware v.3 and lower (Type 4)
+    light_bulb = MagicHomeDevice(
+        device_ip="192.169.176.12", 
+        device_type=1, 
+        keep_alive=True
+        )
 
-Explanation of Terms:
-- RGB: Red, Green, Blue
-- WW: Warm White
-- CW: Cold White
+    light_bulb.turn_on() # turn on
 
-- keep_alive=True:
-    Keeps socket opened after sending, can be reused for the next command
-- keep_alive=False:
-    After each command, close the connection and reestablish it for the
-    next command.
+    light_bulb.change_color(255, 0, 255) # change color to pink
 
-Note on error handling:
-turn_on(), turn_off(), update_device() and send_preset_function()
-propagate OSError to the caller. Use try/except when using this module.
+    light_bulb.get_status(return_debug_info=True) # return current light status
+
+    light_bulb.turn_off() # turn off
+
+Common Errors:
+- Passing cold and warm white values in change_color() simultaneously will raise a ValueError
+- Passing any white and a color value will also raise a ValueError
+- Passing a preset number and a preset name simultaneously in send_preset(), 
+even if they refer to the same one, will raise a ValueError
 """
 
 import socket
@@ -33,8 +29,8 @@ import datetime
 from typing import Literal
 
 
-class MagicHomeApi:
-    """Representation of a MagicHome device."""
+class MagicHomeDevice:
+    """Represents a Magic Home device."""
 
     PRESETS = {"rainbow_fade": 37, 
                     "r_b": 38, "g_b": 39, "b_b": 40, "y_b": 41, "lb_b": 42, "m_b": 43, "w_b": 44, "r+g_b": 45, "r+b_b": 46, "g+b_b": 47, 
@@ -134,20 +130,12 @@ class MagicHomeApi:
     def get_status(self, return_debug_info: bool = False) -> dict:
         """Returns the current, human readable status of a device as a dictionary.
 
-        Only byte 4 and 12 are not included, since information online and test results 
-        return contradicting information what these bytes represent.
-
         If return_debug_info is set to True, 
-        info like message head, model number, etc. will be included in the dictionary."""
+        info like message head and model number will be included in the dictionary."""
 
         try:
             self.send_bytes(0x81, 0x8A, 0x8B, 0x96)
             status = self.socket.recv(14)
-
-            # Fixed a previous error which used 15 bytes instead of 14, 
-            # which is always the correct length for all hardware types.
-            # Source: Own testing on type 1 hardware,
-            # https://github.com/lightinglibs/flux_led/tree/master/flux_led
 
         except OSError as recv_e:
             raise OSError("Error while trying to fetch status from device.") from recv_e
@@ -169,7 +157,7 @@ class MagicHomeApi:
             preset_number = int(status[3])
 
         preset_slowdown = int(status[5])
-        # For explanation, please refer to the docstring of send_preset_function()
+        # For explanation, please refer to the docstring of send_preset()
 
         r, g, b = status[6], status[7], status[8]
 
@@ -200,7 +188,7 @@ class MagicHomeApi:
 
         
 
-    def update_device(self,
+    def change_color(self,
                       r: int = 0,
                       g: int = 0,
                       b: int = 0,
@@ -287,7 +275,7 @@ class MagicHomeApi:
         else:
             return white_percent
 
-    def send_preset_function(self, preset_name: str | None = None, preset_number: int | None = None, slowdown: int = 100):
+    def send_preset(self, preset_name: str | None = None, preset_number: int | None = None, slowdown: int = 100):
         """Send a preset command to a device.
 
         The following abbreviations are used:
@@ -295,10 +283,10 @@ class MagicHomeApi:
         r: red, g: green, b: blue, y: yellow, lb: light blue,
         m: magenta (pink), w: white, rainbow: rainbow (all colors).
 
-        fade: fade, b: breathing, fl: flashing, c: change without
+        fade: fading, b: breathing, fl: flashing, c: change without
         transition. 
         
-        If two colors are named together connected with a +, they alternate.
+        If two colors are named together, connected with a +, they alternate.
 
         The slowdown value ranges from 1 to 31.
         
@@ -306,7 +294,7 @@ class MagicHomeApi:
         means the brake is fully applied (slowest), while a value of 1 
         means the brake is not applied at all (fastest).
 
-        Passing a legacy preset number in the range of 0x25 (int 37)
+        Passing a preset number in the range of 0x25 (int 37)
         to 0x38 (int 56) instead of a preset name is possible, but
         passing both will raise a ValueError.
 
@@ -350,7 +338,7 @@ class MagicHomeApi:
         return sum(bytes_param) & 0xFF
 
     def send_bytes(self, *bytes_params):
-        """Send commands to the device."""
+        """Sends commands to the device."""
         try:
             self.reconnect()
             message_length = len(bytes_params)
@@ -362,10 +350,10 @@ class MagicHomeApi:
             raise  # the caller must know that nothing was sent
 
     def reconnect(self):
-        """Reestablish the connection if it is closed or too old.
+        """Reestablishes the connection.
 
         A connection that has not been used for 5 minutes is replaced,
-        as is a connection that was closed because keep_alive is False.
+        just like one that was closed because keep_alive is- set to False.
         """
         time_since_last_con = (datetime.datetime.now()
                                - self.last_connection).total_seconds()
