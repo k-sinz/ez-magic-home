@@ -23,10 +23,14 @@ Common Errors:
 even if they refer to the same one, will raise a ValueError
 """
 
+from collections import deque # "recents" queue
+from colorsys import hsv_to_rgb, rgb_to_hsv
 import socket
 import struct
 import datetime
 from typing import Literal
+
+from webcolors import rgb_to_hex
 
 
 class MagicHomeDevice:
@@ -53,6 +57,14 @@ class MagicHomeDevice:
 
         self.last_connection = datetime.datetime.now()
         # current time is set as the latest connection
+
+        self.recents_rgb = deque(iterable=[], maxlen=6)
+        self.recents_hex = deque(iterable=[], maxlen=6)
+        # index 0 is the most recent, 1 is the second most recent, etc.
+
+        self.pending_call = None
+        # holds next change_color(), 
+        # to be applied on the next turn_on()
 
         self.keep_alive = keep_alive
         self.set_fresh_socket()
@@ -120,12 +132,17 @@ class MagicHomeDevice:
         else:
             self.send_bytes(0xCC, 0x23, 0x33)
 
+        if self.pending_call is not None:
+            self.change_color(**self.pending_call)
+            self.pending_call = None
+
     def turn_off(self):
         """Turn a device off."""
         if self.device_type < 4:
             self.send_bytes(0x71, 0x24, 0x0F, 0xA4)
         else:
             self.send_bytes(0xCC, 0x24, 0x33)
+        
 
     def get_status(self, return_debug_info: bool = False) -> dict:
         """Returns the current, human readable status of a device as a dictionary.
@@ -159,15 +176,28 @@ class MagicHomeDevice:
         preset_slowdown = int(status[5])
         # For explanation, please refer to the docstring of send_preset()
 
-        r, g, b = status[6], status[7], status[8]
+        r = status[6]
+        g = status[7]
+        b = status[8]
 
         ww = status[9] # warm white
+        # range is 255 not 100 in the raw bytes package!
 
         version_number = status[10]
 
-        cw = status[11] # cold white, stays at 0 for some device types
+        cw = status[11] # cold white, always stays at 0 for some device types, e.g. type 1
+        # range is 255 not 100 in the raw bytes package!
 
         checksum = status[13]
+
+        if ww:
+            brightness = int(ww / 255 * 100)
+        elif cw:
+            brightness = int(cw / 255 * 100)
+        elif r or g or b:
+            brightness = int((max(r, g, b) / 255) * 100)
+        else:
+            brightness = 0
 
         if return_debug_info:
             status_dict = {"message_head": message_head, 
@@ -177,16 +207,14 @@ class MagicHomeDevice:
                            "preset_slowdown": preset_slowdown, 
                            "r": r, "g": g, "b": b, 
                            "ww": ww, "version_number": version_number, 
-                           "cw": cw, "checksum": checksum}
+                           "cw": cw, "brightness": brightness, "checksum": checksum}
         else:
             status_dict = {"on": on, "preset_name": preset_name, 
                            "preset_number": preset_number, 
                            "preset_slowdown": preset_slowdown, 
                            "r": r, "g": g, "b": b, 
-                           "ww": ww, "cw": cw}
+                           "ww": ww, "cw": cw, "brightness": brightness}
         return status_dict
-
-        
 
     def change_color(self,
                       r: int = 0,
@@ -194,13 +222,19 @@ class MagicHomeDevice:
                       b: int = 0,
                       ww: int | None = None,
                       cw: int | None = None):
-        """Update a device based upon what we're sending to it.
+        """Change the color of a device using RGB values.
 
         RGB values are accepted as integers in the range of 0-255.
+
         White values are accepted as integers representing the range of
         0%-100%, and are allowed to have a value of None.
+
         However, please note that white and RGB values together raise a
         ValueError, just like two different types of white together.
+
+        Values that are too high or too low automatically get clamped into the allowed range.
+
+        Passing change_color() with 0 values only will raise a ValueError.
         """
         # n = normalized
         n_r = self.norm_color(r)
@@ -220,6 +254,37 @@ class MagicHomeDevice:
         if n_ww != 0 and n_cw != 0:
             raise ValueError(
                 "Pass either cold white or warm white value, not both")
+
+        if n_ww:
+            scaler = n_ww * 0.01
+            ww_base_r = int(255 * scaler)
+            ww_base_g = int(165 * scaler)
+            ww_base_b = int(127 * scaler)
+            # replicates a ww color for easy representation in the front end
+
+            cached_rgb = (ww_base_r, ww_base_g, ww_base_b)
+            cached_hex = rgb_to_hex((ww_base_r, ww_base_g, ww_base_b))
+
+        elif n_cw:
+            scaler = n_cw * 0.01
+            cw_base_r = int(255 * scaler)
+            cw_base_g = int(255 * scaler)
+            cw_base_b = int(255 * scaler)
+            # replicates a cw color for easy representation in the front end
+
+            cached_rgb = (cw_base_r, cw_base_g, cw_base_b)
+            cached_hex = rgb_to_hex((cw_base_r, cw_base_g, cw_base_b))
+
+        elif n_r or n_g or n_b:
+            # replicates a color for easy representation in the front end
+            cached_rgb = (n_r, n_g, n_b)
+            cached_hex = rgb_to_hex((n_r, n_g, n_b))
+
+        else:
+            raise ValueError("Do not pass change_color() with 0 values only, use turn_off() instead.")
+
+        self.recents_rgb.appendleft(cached_rgb)
+        self.recents_hex.appendleft(cached_hex)
 
         if self.device_type in (0, 1):
             # Update RGB or RGB + WW device
@@ -254,6 +319,79 @@ class MagicHomeDevice:
             # Device type other than [0,1,2,3,4] passed
             raise ValueError("Invalid Device Type")
 
+        # important to not keep an already used pending call
+        self.pending_call = None
+
+    def change_brightness(self, input_brightness: int):
+        """Change the brightness of a device.
+
+        Values are a percentage ranging from 1% to 100%.
+
+        0% is not available (refer to documentation for reasons), use turn_off() instead.
+
+        Values that are too high or too low automatically get clamped into the allowed range.
+
+        If there is no color set, you cannot change the brightness and need to use change_color() first.
+
+        If the device is currently off, nothing is sent to the device: only the internal
+        preview/"recents" cache is updated, so the brightness slider can be "prepared"
+        without risking a surprise flashbang when the device is turned back on.
+        """
+        if (input_brightness is None) or (input_brightness < 1):
+            clamped_brightness = 1
+        elif input_brightness > 100:
+            clamped_brightness = 100
+        else:
+            clamped_brightness = input_brightness
+
+        status_d = self.get_status()
+
+        if status_d["ww"]:
+            scaler = clamped_brightness * 0.01
+            new_rgb = (int(255 * scaler), int(165 * scaler), int(127 * scaler))
+            new_hex = rgb_to_hex(new_rgb)
+            if status_d["on"]:
+                self.change_color(ww=clamped_brightness)
+            else:
+                self.recents_rgb.appendleft(new_rgb)
+                self.recents_hex.appendleft(new_hex)
+                self.pending_call = {"ww": clamped_brightness}
+            return
+
+        if status_d["cw"]:
+            scaler = clamped_brightness * 0.01
+            new_rgb = (int(255 * scaler),) * 3
+            new_hex = rgb_to_hex(new_rgb)
+            if status_d["on"]:
+                self.change_color(cw=clamped_brightness)
+            else:
+                self.recents_rgb.appendleft(new_rgb)
+                self.recents_hex.appendleft(new_hex)
+                self.pending_call = {"cw": clamped_brightness}
+            return
+
+        cur_r = status_d["r"] / 255
+        cur_g = status_d["g"] / 255
+        cur_b = status_d["b"] / 255
+        biggest = max(cur_r, cur_g, cur_b)
+
+        if biggest <= 0:
+            print("No color to change brightness of, select color first.")
+            return
+
+        hsv_conv = list(rgb_to_hsv(cur_r, cur_g, cur_b))
+        hsv_conv[2] = clamped_brightness * 0.01
+        rgb_float = hsv_to_rgb(*hsv_conv)
+        new_rgb = tuple(int(c * 255) for c in rgb_float)
+        new_hex = rgb_to_hex(new_rgb)
+
+        if status_d["on"]:
+            self.change_color(*new_rgb)
+        else:
+            self.recents_rgb.appendleft(new_rgb)
+            self.recents_hex.appendleft(new_hex)
+            self.pending_call = {"r": new_rgb[0], "g": new_rgb[1], "b": new_rgb[2]}
+
     def norm_color(self, color_val: int):
         """Normalize a color value into the allowed 0-255 range."""
         if color_val < 0:
@@ -264,16 +402,16 @@ class MagicHomeDevice:
             return color_val
 
     def norm_white(self, white_percent: int | None = None):
-        """Normalize a white light value into the allowed 0%-100% range.
+        """Normalize a white light value into the allowed 0-255 range.
 
-        White values are a percentage.
+        Entered values are considered a percentage from 1% - 100%.
         """
-        if (white_percent is None) or (white_percent < 0):
+        if (white_percent is None) or (white_percent < 1):
             return 0
         elif white_percent > 100:
-            return 100
+            return 255
         else:
-            return white_percent
+            return int(white_percent * 0.01 * 255)
 
     def send_preset(self, preset_name: str | None = None, preset_number: int | None = None, slowdown: int = 100):
         """Send a preset command to a device.

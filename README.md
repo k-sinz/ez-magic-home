@@ -43,17 +43,42 @@ get_status(return_debug_info: bool)
 ```
 
 Change device color
-> Please note: Pass only color, or warm white, or cold white, 
-combining types will raise a ValueError.   
+> Please note: Pass only color, or warm white, or cold white, combining types will raise a ValueError.  
+Passing change_color() with 0 values only will also raise a ValueError, please use turn_off() instead.  
+The reason for this is that if the device loses it's color completely by a user setting the color to (0, 0, 0), the brightness can not be changed again with change_brightness(), so then the user would have to set a new color theirselves, temporarily rendering the brightness slider useless.  
+If you want no color, please use the turn_off() method instead.
 ```python
 change_color(r: int, g: int, b: int, ww: int, cw: int)
+```
+
+Change device brightness
+> Changes the brightness of a device.  
+Values are a percentage ranging from 1% to 100%.  
+Similar to change_color(), 0% is not available.  
+This is because change_brightness() uses highly complex code that calculates the current brightness from the device's color values only. Therefore, a user setting the brightness to 0% would set the color to (0, 0, 0), again leading to the problem described in change_color().  
+Similarily to change_color(), if you want zero brightness, please use the turn_off() method instead.  
+Values that are too high or too low automatically get clamped into the allowed range.  
+If there is no color set, you cannot change the brightness and need to use change_color() first.  
+it does not raise an Error but instead just prints, since the user did nothing wrong, but should do nothing since there's no color to scale, and any assumed behaviour would be unexpected.
+If the device is currently off, calling change_brightness() will not turn it on or send 
+anything to the device. It only updates the internal preview ("recents") cache, so the 
+next time you look at recent/favorite colors, the prepared brightness is reflected there.  
+This is intentional: sending any color command to some devices turns them back on, 
+which would defeat the purpose of a brightness slider that's supposed to be safe to touch 
+while the light is off ("flashbang" prevention late at night :P).  
+```python
+change_brightness(input_brightness: int)
 ```
 
 Normalize RGB color values into the allowed 0-255 range  
 `norm_color(color_val: int)`
 
-Normalize white light values into the allowed 0-100% range  
-`norm_white(white_percent: int)`
+Normalize (translate) white light values into the allowed 0-255 range.  
+Entered values are considered a percentage from 1% - 100%.
+0% is not available as explained above.
+```python
+norm_white(white_percent: int)
+```
 
 Select one of the device lighting presets  
 > e.g. a colorful fade or blue breathing  
@@ -131,6 +156,11 @@ light_bulb.change_color(255, 0, 255)
 light_bulb.change_color(ww=100)
 ```
 
+> Reduce the device's color to a dim, warm white
+```python
+change_brightness(10)
+```
+
 > Return current light status including debug info
 ```python
 light_bulb.get_status(return_debug_info=True)
@@ -138,7 +168,7 @@ light_bulb.get_status(return_debug_info=True)
 
 > Make the device breathe slowly in alternating red and blue colors
 ```python
-light_bulb.send_preset(preset_name=r+b_b, slowdown=10)
+light_bulb.send_preset(preset_name="r+b_b", slowdown=10)
 ```
 
 > Make the device flash quickly in green using a preset number
